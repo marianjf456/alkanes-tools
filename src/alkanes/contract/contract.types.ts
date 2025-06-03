@@ -4,7 +4,7 @@ export class DeployDto {
     name: string;
     symbol: string;
     supply: number;
-    utxos: FormattedUtxo[];
+    mnemonic: string;
     fee_rate: number;
 }
 

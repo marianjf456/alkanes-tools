@@ -24,6 +24,7 @@ import {
   tweakSigner,
   getWalletPrivateKeys,
   calculateTaprootTxSize,
+  utxo as utxoUtils,
 } from '@oyl/sdk';
 
 @Injectable()
@@ -102,12 +103,29 @@ export class ContractService {
       const mnemonic = generateMnemonic();
       const account = mnemonicToAccount({ mnemonic, opts: { network } });
       const signer = this.getSigner(mnemonic, network);
+
+      // Detailed logging to diagnose the issue
+      this.logger.debug(`Signer created: ${!!signer}`);
+      this.logger.debug(`Taproot key pair exists: ${!!signer.taprootKeyPair}`);
+      if (signer.taprootKeyPair) {
+        this.logger.debug(`Taproot public key: ${signer.taprootKeyPair.publicKey?.toString('hex') || 'undefined'}`);
+        this.logger.debug(`Taproot private key exists: ${!!signer.taprootKeyPair.privateKey}`);
+      }
+
+      if (!signer.taprootKeyPair) {
+        throw new InternalServerErrorException('Taproot key pair is undefined. Check wallet initialization.');
+      }
+
       const tweakedTaprootKeyPair: bitcoin.Signer = tweakSigner(
         signer.taprootKeyPair,
         {
           network: provider.network,
         }
-      )
+      );
+
+      if (!tweakedTaprootKeyPair || !tweakedTaprootKeyPair.publicKey) {
+        throw new InternalServerErrorException('Failed to create tweaked taproot key pair');
+      }
 
       const tweakedPublicKey = tweakedTaprootKeyPair.publicKey.toString('hex');
       const gatheredUtxos = {
@@ -173,27 +191,6 @@ export class ContractService {
         provider,
       })
 
-      // const commitTxId = bitcoin.Psbt.fromBase64(finalCommitPsbt, { network: provider.network }).extractTransaction().getId();
-      // const { fee: revealFee, vsize: revealSize } = await alkanes.contract.actualDeployRevealFee({
-      //   protostone,
-      //   tweakedPublicKey,
-      //   receiverAddress: account.taproot.address,
-      //   commitTxId,
-      //   script,
-      //   provider,
-      //   feeRate,
-      // })
-
-      // const { psbt: finalRevealPsbt } = await alkanes.createDeployRevealPsbt({
-      //   protostone,
-      //   tweakedPublicKey,
-      //   receiverAddress: account.taproot.address,
-      //   commitTxId,
-      //   script,
-      //   provider,
-      //   feeRate,
-      //   fee: revealFee,
-      // })
 
       this.logger.log(
         `Pre-deployment successful for ${preDeployDto.name}`,
@@ -251,7 +248,7 @@ export class ContractService {
 
       const provider = this.getProvider('signet');
       const network = provider.network;
-      const mnemonic = generateMnemonic();
+      const mnemonic = deployDto.mnemonic;
       const account = mnemonicToAccount({ mnemonic, opts: { network } });
       const signer = this.getSigner(mnemonic, network);
       const tweakedTaprootKeyPair: bitcoin.Signer = tweakSigner(
@@ -262,10 +259,7 @@ export class ContractService {
       )
 
       const tweakedPublicKey = tweakedTaprootKeyPair.publicKey.toString('hex');
-      const gatheredUtxos = {
-        utxos: deployDto.utxos,
-        totalAmount: deployDto.utxos.reduce((acc, utxo) => acc + utxo.satoshis, 0),
-      };
+      const { spendableUtxos, spendableTotalBalance } = await utxoUtils.addressUtxos({ address: account.nativeSegwit.address, provider });
       const feeRate = deployDto.fee_rate;
       const nameBytes = Buffer.from(deployDto.name, 'utf8');
       const symbolBytes = Buffer.from(deployDto.symbol, 'utf8');
@@ -286,6 +280,10 @@ export class ContractService {
         ],
       }).encodedRunestone;
 
+      const gatheredUtxos = {
+        utxos: spendableUtxos,
+        totalAmount: spendableTotalBalance
+      };
       const { fee: commitFee } = await alkanes.contract.actualDeployCommitFee({
         payload,
         gatheredUtxos,
@@ -295,7 +293,7 @@ export class ContractService {
         feeRate,
       })
 
-      const { psbt: finalCommitPsbt, script } = await alkanes.createDeployCommitPsbt({
+      const { psbt: finalCommitPsbtBase64, script } = await alkanes.createDeployCommitPsbt({
         payload,
         gatheredUtxos,
         tweakedPublicKey,
@@ -305,12 +303,13 @@ export class ContractService {
         fee: commitFee,
       })
 
-      const { signedPsbt: signedCommitPsbt } = await signer.signAllInputs({
-        rawPsbt: finalCommitPsbt,
+      const { signedPsbt: signedCommitPsbtBase64 } = await signer.signAllInputs({
+        rawPsbt: finalCommitPsbtBase64,
         finalize: true,
       })
-      const commitTx = bitcoin.Psbt.fromBase64(signedCommitPsbt, { network: provider.network }).extractTransaction();
-      const { psbt: revealPsbt } = await this.createDeployRevealPsbt({
+      const finalCommitPsbt = bitcoin.Psbt.fromBase64(signedCommitPsbtBase64, { network: provider.network });
+      const commitTx = finalCommitPsbt.extractTransaction();
+      const { psbt: revealPsbtBase64 } = await this.createDeployRevealPsbt({
         protostone,
         receiverAddress: account.taproot.address,
         script,
@@ -327,10 +326,10 @@ export class ContractService {
       })
       const { fee: estimatedFee } = await this.getEstimatedFee({
         feeRate,
-        psbt: revealPsbt,
+        psbt: revealPsbtBase64,
         provider,
       })
-      const { psbt: finalRevealPsbt } = await this.createDeployRevealPsbt({
+      const { psbt: finalRevealPsbtBase64 } = await this.createDeployRevealPsbt({
         protostone,
         receiverAddress: account.taproot.address,
         script,
@@ -345,14 +344,24 @@ export class ContractService {
         },
         fee: estimatedFee,
       })
+      let finalRevealPsbt = bitcoin.Psbt.fromBase64(finalRevealPsbtBase64, {
+        network: provider.network,
+      })
+
+      finalRevealPsbt.signInput(0, tweakedTaprootKeyPair)
+      finalRevealPsbt.finalizeInput(0)
+
+      const revealTx = finalRevealPsbt.extractTransaction();
 
       this.logger.log(
         `Deployment successful for ${deployDto.name}.`,
       );
       return {
         success: true,
-        commitPsbt: finalCommitPsbt,
-        revealPsbt: finalRevealPsbt,
+        // commitPsbtHex: finalCommitPsbt.toHex(),
+        // revealPsbtHex: finalRevealPsbt.toHex(),
+        commitTxHex: commitTx.toHex(),
+        revealTxHex: revealTx.toHex(),
         contractId: '',
         alkaneId: '', // Standard Alkane ID format
       };

@@ -1,15 +1,11 @@
+import { FormattedUtxo } from '@oyl/sdk';
+
 export class DeployDto {
-    signedCommitPsbtBase64: string;
-
-    mnemonic: string;
-
-    contractName: string; // To identify Wasm file & potentially for metadata
-
-    symbol: string; // For protostone metadata
-
-    totalSupply: number; // For protostone metadata
-
-    decimals?: number; // Optional, for protostone metadata
+    name: string;
+    symbol: string;
+    supply: number;
+    utxos: FormattedUtxo[];
+    fee_rate: number;
 }
 
 export class ExecuteDto {
@@ -27,9 +23,9 @@ export class ExecuteDto {
 }
 
 export class PreDeployDto {
-    contractName: string;
-
+    name: string;
     symbol: string;
-
-    totalSupply: number;
+    supply: number;
+    utxos: FormattedUtxo[];
+    fee_rate: number;
 }

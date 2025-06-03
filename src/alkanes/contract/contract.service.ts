@@ -300,7 +300,7 @@ export class ContractService {
         account,
         provider,
         feeRate,
-        fee: commitFee,
+        fee: commitFee + 1000,
       })
 
       const { signedPsbt: signedCommitPsbtBase64 } = await signer.signAllInputs({

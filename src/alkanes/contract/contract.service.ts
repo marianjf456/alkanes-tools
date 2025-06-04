@@ -11,9 +11,8 @@ import * as path from 'path';
 import * as bitcoin from '@btc-vision/bitcoin';
 import ecc from '@bitcoinerlab/secp256k1';
 import { encodeRunestoneProtostone, ProtoStone, encipher } from 'alkanes'
-
-bitcoin.initEccLib(ecc);
-
+import { promisify } from 'util'
+import { gzip as _gzip } from 'node:zlib'
 import {
   generateMnemonic,
   mnemonicToAccount,
@@ -25,7 +24,12 @@ import {
   getWalletPrivateKeys,
   calculateTaprootTxSize,
   utxo as utxoUtils,
+  packUTF8,
 } from '@oyl/sdk';
+
+bitcoin.initEccLib(ecc);
+
+
 
 @Injectable()
 export class ContractService {
@@ -77,9 +81,13 @@ export class ContractService {
       const wasmFilePath = path.join(wasmBaseDir, wasmFileName);
 
       this.logger.log(`Reading Wasm file from: ${wasmFilePath}`);
-      let contractWasm: Buffer;
+      let contract: Uint8Array;
       try {
-        contractWasm = await fs.readFile(wasmFilePath);
+        contract = new Uint8Array(
+          Array.from(
+            await fs.readFile(path.resolve(wasmBaseDir, wasmFileName))
+          )
+        )
       } catch (err) {
         this.logger.error(
           `Failed to read Wasm file at ${wasmFilePath}`,
@@ -90,8 +98,9 @@ export class ContractService {
         );
       }
 
+      const gzip = promisify(_gzip)
       const payload: AlkanesPayload = {
-        body: contractWasm,
+        body: await gzip(contract, { level: 9 }),
         cursed: false,
         tags: {
           contentType: '',
@@ -225,9 +234,13 @@ export class ContractService {
       const wasmFilePath = path.join(wasmBaseDir, wasmFileName);
 
       this.logger.log(`Reading Wasm file from: ${wasmFilePath}`);
-      let contractWasm: Buffer;
+      let contract: Uint8Array;
       try {
-        contractWasm = await fs.readFile(wasmFilePath);
+        contract = new Uint8Array(
+          Array.from(
+            await fs.readFile(path.resolve(wasmBaseDir, wasmFileName))
+          )
+        )
       } catch (err) {
         this.logger.error(
           `Failed to read Wasm file at ${wasmFilePath}`,
@@ -238,8 +251,9 @@ export class ContractService {
         );
       }
 
+      const gzip = promisify(_gzip)
       const payload: AlkanesPayload = {
-        body: contractWasm,
+        body: await gzip(contract, { level: 9 }),
         cursed: false,
         tags: {
           contentType: '',
@@ -261,8 +275,16 @@ export class ContractService {
       const tweakedPublicKey = tweakedTaprootKeyPair.publicKey.toString('hex');
       const { spendableUtxos, spendableTotalBalance } = await utxoUtils.addressUtxos({ address: account.nativeSegwit.address, provider });
       const feeRate = deployDto.fee_rate;
-      const nameBytes = Buffer.from(deployDto.name, 'utf8');
-      const symbolBytes = Buffer.from(deployDto.symbol, 'utf8');
+      const tokenName = packUTF8(deployDto.name)
+      const tokenSymbol = packUTF8(deployDto.symbol)
+
+      if (tokenName.length > 1) {
+        throw new Error('Token name too long')
+      }
+
+      if (tokenSymbol.length > 1) {
+        throw new Error('Token symbol too long')
+      }
       const protostone = encodeRunestoneProtostone({
         protostones: [
           ProtoStone.message({
@@ -272,8 +294,8 @@ export class ContractService {
             refundPointer: 0,
             calldata: encipher([
               0n,  // opcode  
-              ...Array.from(nameBytes).map(b => BigInt(Number(b))),
-              ...Array.from(symbolBytes).map(b => BigInt(Number(b))),
+              BigInt('0x' + tokenName[0]),
+              BigInt('0x' + tokenSymbol[0]),
               typeof deployDto.supply === 'number' ? BigInt(deployDto.supply) : deployDto.supply,  // total_supply  
             ]),
           }),
@@ -386,9 +408,16 @@ export class ContractService {
       this.logger.log(
         `Execution successful for contract ${executeDto.contractId}, method ${executeDto.methodName}.`,
       );
+      const provider = await this.getProvider('signet')
+      const outputs = await provider.alkanes.getAlkanesByAddress({ address: 'tb1qgzpannrz5r6g9q4xaulawfj387djw6axjyzs8x' });
+      console.log('getAlkanesByAddress', outputs);
+
+      const traceResp = await provider.alkanes.trace({ txid: '5b9f28c2aa2322b21030212186c85aa62a821522495badac74ab5ad511ffea63', vout: 3 })
+      console.log('trace', JSON.stringify(traceResp));
+
       return {
         success: true,
-        executionTxId: '',
+        data: traceResp,
       };
     } catch (error) {
       this.logger.error(
